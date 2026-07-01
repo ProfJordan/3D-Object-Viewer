@@ -13,6 +13,7 @@ function initViewer() {
   const resetButton = document.getElementById("reset-view");
   const exportButton = document.getElementById("export-image");
   const statusEl = document.getElementById("status");
+  const materialListEl = document.getElementById("material-list");
 
   if (!app || !fileInput || !dropZone || !resetButton || !exportButton || !statusEl) {
     console.warn("Viewer DOM is not ready yet.");
@@ -106,6 +107,45 @@ function initViewer() {
     currentModel = null;
   }
 
+  function updateMaterialInspector(object) {
+    const entries = [];
+    object.traverse((child) => {
+      if (!child.isMesh) return;
+
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      materials.forEach((material, index) => {
+        if (!material) return;
+        const textureNames = [];
+        if (material.map) textureNames.push(`map: ${material.map.name || "texture"}`);
+        if (material.emissiveMap) textureNames.push(`emissive: ${material.emissiveMap.name || "texture"}`);
+        if (material.normalMap) textureNames.push(`normal: ${material.normalMap.name || "texture"}`);
+        if (material.roughnessMap) textureNames.push(`roughness: ${material.roughnessMap.name || "texture"}`);
+
+        const label = `${child.name || "Mesh"}${materials.length > 1 ? ` (${index + 1})` : ""}`;
+        entries.push({
+          label,
+          textureNames: textureNames.length ? textureNames : ["No textures detected"],
+        });
+      });
+    });
+
+    if (!entries.length) {
+      materialListEl.innerHTML = "No mesh materials found.";
+      return;
+    }
+
+    materialListEl.innerHTML = entries
+      .map(
+        (entry) => `
+          <div class="material-item">
+            <strong>${entry.label}</strong>
+            ${entry.textureNames.map((texture) => `<div>${texture}</div>`).join("")}
+          </div>
+        `,
+      )
+      .join("");
+  }
+
   function onModelLoaded(object, label) {
     clearScene();
     object.rotation.set(0, 0, 0);
@@ -129,6 +169,7 @@ function initViewer() {
 
     scene.add(object);
     currentModel = object;
+    updateMaterialInspector(object);
     statusEl.textContent = `Loaded ${label}${texturedMeshCount ? ` • ${texturedMeshCount} textured mesh${texturedMeshCount > 1 ? "es" : ""}` : " • no textures detected"}`;
     fitCameraToObject(object);
   }

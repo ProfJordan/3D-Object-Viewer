@@ -120,3 +120,35 @@ input[type="file"] {
   font-size: 0.9rem;
   min-height: 1.2rem;
 }
+
+.material-panel {
+  margin-top: 0.8rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.25);
+  padding-top: 0.8rem;
+}
+
+.material-panel__title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 0.45rem;
+  color: #f8fafc;
+}
+
+.material-list {
+  display: grid;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.material-item {
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.55rem;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.material-item strong {
+  display: block;
+  margin-bottom: 0.2rem;
+}
