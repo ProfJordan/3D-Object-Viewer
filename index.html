@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3D Object Viewer</title>
+</head>
+
+<body>
+    <div id="app"></div>
+    <div id="overlay" class="overlay">
+        <div class="panel">
+            <h1>3D Object Viewer</h1>
+            <p>Drop a local model file or folder here or choose one below.</p>
+            <p class="supported">Supported: GLTF/GLB, OBJ/MTL, FBX</p>
+            <p class="hint">Drag to orbit, scroll to zoom, and drag with the right mouse button to pan.</p>
+            <div class="actions">
+                <label class="button" for="file-input">Choose model or folder</label>
+                <input id="file-input" type="file" accept=".glb,.gltf,.obj,.mtl,.fbx,.bin,image/*" multiple webkitdirectory directory />
+                <button id="reset-view" type="button">Reset view</button>
+                <button id="export-image" type="button">Export PNG</button>
+            </div>
+            <div id="drop-zone" class="drop-zone">Drop files or a folder here</div>
+            <div id="status" class="status">Waiting for a model…</div>
+        </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+</body>
+
+</html>
