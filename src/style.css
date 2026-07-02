@@ -121,6 +121,21 @@ input[type="file"] {
   min-height: 1.2rem;
 }
 
+.display-controls {
+  margin-top: 0.8rem;
+  display: flex;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: #e2e8f0;
+}
+
 .material-panel {
   margin-top: 0.8rem;
   border-top: 1px solid rgba(148, 163, 184, 0.25);

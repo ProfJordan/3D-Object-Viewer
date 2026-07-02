@@ -5,6 +5,7 @@ import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MTLLoader } from "three/examples/jsm/loaders/MTLLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
+import { TGALoader } from "three/examples/jsm/loaders/TGALoader.js";
 
 function initViewer() {
   const app = document.getElementById("app");
@@ -14,6 +15,8 @@ function initViewer() {
   const exportButton = document.getElementById("export-image");
   const statusEl = document.getElementById("status");
   const materialListEl = document.getElementById("material-list");
+  const toggleTexturesInput = document.getElementById("toggle-textures");
+  const toggleWireframeInput = document.getElementById("toggle-wireframe");
 
   if (!app || !fileInput || !dropZone || !resetButton || !exportButton || !statusEl) {
     console.warn("Viewer DOM is not ready yet.");
@@ -107,6 +110,40 @@ function initViewer() {
     currentModel = null;
   }
 
+  function applyDisplaySettings(object) {
+    object.traverse((child) => {
+      if (!child.isMesh) return;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      materials.forEach((material) => {
+        if (!material) return;
+        const visible = toggleTexturesInput?.checked ?? true;
+        const wireframe = toggleWireframeInput?.checked ?? false;
+        material.transparent = true;
+        material.depthWrite = true;
+        material.wireframe = wireframe;
+        if (material.isMeshStandardMaterial || material.isMeshBasicMaterial || material.isMeshPhongMaterial) {
+          material.needsUpdate = true;
+          if (!visible) {
+            material.color.setHex(0x111827);
+            material.map = null;
+            material.emissiveMap = null;
+            material.normalMap = null;
+            material.roughnessMap = null;
+          } else {
+            const originalMap = material.userData?.originalMap || material.map;
+            const originalEmissiveMap = material.userData?.originalEmissiveMap || material.emissiveMap;
+            const originalNormalMap = material.userData?.originalNormalMap || material.normalMap;
+            const originalRoughnessMap = material.userData?.originalRoughnessMap || material.roughnessMap;
+            material.map = originalMap || material.map;
+            material.emissiveMap = originalEmissiveMap || material.emissiveMap;
+            material.normalMap = originalNormalMap || material.normalMap;
+            material.roughnessMap = originalRoughnessMap || material.roughnessMap;
+          }
+        }
+      });
+    });
+  }
+
   function updateMaterialInspector(object) {
     const entries = [];
     object.traverse((child) => {
@@ -167,8 +204,21 @@ function initViewer() {
       }
     });
 
+    object.traverse((child) => {
+      if (!child.isMesh) return;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      materials.forEach((material) => {
+        if (!material) return;
+        material.userData.originalMap = material.map ?? null;
+        material.userData.originalEmissiveMap = material.emissiveMap ?? null;
+        material.userData.originalNormalMap = material.normalMap ?? null;
+        material.userData.originalRoughnessMap = material.roughnessMap ?? null;
+      });
+    });
+
     scene.add(object);
     currentModel = object;
+    applyDisplaySettings(object);
     updateMaterialInspector(object);
     statusEl.textContent = `Loaded ${label}${texturedMeshCount ? ` • ${texturedMeshCount} textured mesh${texturedMeshCount > 1 ? "es" : ""}` : " • no textures detected"}`;
     fitCameraToObject(object);
@@ -212,19 +262,128 @@ function initViewer() {
       map.set(relativePath.toLowerCase(), objectUrl);
       map.set(file.name.toLowerCase(), objectUrl);
       map.set(basename, objectUrl);
+      
+      // Also map without extension for texture fallback
+      const withoutExt = basename.replace(/\.[^.]+$/, '').toLowerCase();
+      if (withoutExt) {
+        map.set(withoutExt, objectUrl);
+      }
     }
     return map;
   }
 
+  function createTextureLoader(assetMap) {
+    const textureLoader = new THREE.TextureLoader();
+    const tgaLoader = new TGALoader();
+    
+    return {
+      load: (url, onLoad, onProgress, onError) => {
+        // Resolve the URL from asset map
+        const resolvedUrl = resolveAssetUrl(url, assetMap);
+        
+        const loadTexture = (urlToLoad) => {
+          if (urlToLoad.toLowerCase().endsWith('.tga')) {
+            tgaLoader.load(
+              urlToLoad,
+              onLoad,
+              onProgress,
+              (err) => {
+                // TGA failed, try to find PNG or JPG equivalent
+                const baseName = urlToLoad.replace(/\.[^.]+$/, '');
+                const pngUrl = resolveAssetUrl(baseName + '.png', assetMap);
+                const jpgUrl = resolveAssetUrl(baseName + '.jpg', assetMap);
+                
+                if (pngUrl !== baseName + '.png') {
+                  textureLoader.load(pngUrl, onLoad, onProgress, (err2) => {
+                    if (jpgUrl !== baseName + '.jpg') {
+                      textureLoader.load(jpgUrl, onLoad, onProgress, onError);
+                    } else {
+                      onError(err);
+                    }
+                  });
+                } else if (jpgUrl !== baseName + '.jpg') {
+                  textureLoader.load(jpgUrl, onLoad, onProgress, onError);
+                } else {
+                  onError(err);
+                }
+              }
+            );
+          } else if (urlToLoad.toLowerCase().endsWith('.bin')) {
+            // .bin files are typically embedded binary data - skip loading as texture
+            onLoad(new THREE.Texture());
+          } else {
+            textureLoader.load(urlToLoad, onLoad, onProgress, (err) => {
+              // If standard format fails, try to find alternative
+              const baseName = urlToLoad.replace(/\.[^.]+$/, '');
+              const extensions = ['.png', '.jpg', '.jpeg', '.tga'];
+              let foundAlternative = false;
+              
+              for (const ext of extensions) {
+                const altUrl = resolveAssetUrl(baseName + ext, assetMap);
+                if (altUrl !== baseName + ext && altUrl !== urlToLoad) {
+                  foundAlternative = true;
+                  const loader = ext === '.tga' ? tgaLoader : textureLoader;
+                  loader.load(altUrl, onLoad, onProgress, onError);
+                  break;
+                }
+              }
+              
+              if (!foundAlternative) {
+                onError(err);
+              }
+            });
+          }
+        };
+        
+        loadTexture(resolvedUrl);
+      }
+    };
+  }
+
   function resolveAssetUrl(value, assetMap) {
     if (typeof value !== "string") return value;
+    
+    // Don't try to resolve blob URLs - they're already resolved
+    if (value.startsWith("blob:")) {
+      return value;
+    }
 
-    const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
-    const direct = assetMap.get(normalized);
+    // First try the exact path
+    let normalized = value.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+    let direct = assetMap.get(normalized);
     if (direct) return direct;
 
+    // If it's a .tga file, try to find .png or .jpg alternatives first
+    if (normalized.endsWith('.tga')) {
+      const baseName = normalized.replace(/\.tga$/i, '');
+      const extensions = ['.png', '.jpg', '.jpeg'];
+      for (const ext of extensions) {
+        const altPath = baseName + ext;
+        const altResolved = assetMap.get(altPath);
+        if (altResolved) return altResolved;
+      }
+      // If no alternatives found, try to load the TGA
+      direct = assetMap.get(normalized);
+      if (direct) return direct;
+    }
+
+    // Try just the basename
     const basename = normalized.split("/").pop();
-    return assetMap.get(basename) ?? value;
+    const basenameResolved = assetMap.get(basename);
+    if (basenameResolved) return basenameResolved;
+
+    // If still not found and it's not a .tga, try alternative extensions
+    if (!normalized.endsWith('.tga')) {
+      const baseName = normalized.replace(/\.[^.]+$/, '');
+      const extensions = ['.png', '.jpg', '.jpeg', '.tga'];
+      for (const ext of extensions) {
+        const altPath = baseName + ext;
+        const altResolved = assetMap.get(altPath);
+        if (altResolved) return altResolved;
+      }
+    }
+
+    return value;
   }
 
   function replaceUriValues(value, assetMap) {
@@ -281,17 +440,69 @@ function initViewer() {
       return;
     }
 
+    // For .gltf files, load and rewrite the JSON with resolved asset URIs
     const assetMap = createAssetUrlMap(files);
+    console.log("Asset map created with entries:", assetMap.size, "files");
+    for (const [key, value] of assetMap.entries()) {
+      console.log(`  ${key} -> ${value}`);
+    }
+    
     const text = await selectedFile.text();
     const parsed = JSON.parse(text);
+
+    console.log("Original GLTF buffers:", parsed.buffers);
+
+    const missingAssets = [];
+    const gatherUris = (value) => {
+      if (typeof value === "string") {
+        if (value.startsWith("data:")) {
+          return;
+        }
+        const resolved = resolveAssetUrl(value, assetMap);
+        if (resolved === value) {
+          missingAssets.push(value);
+        }
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((entry) => gatherUris(entry));
+        return;
+      }
+      if (value && typeof value === "object") {
+        Object.values(value).forEach((childValue) => gatherUris(childValue));
+      }
+    };
+    gatherUris(parsed);
+
+    if (missingAssets.length) {
+      const uniqueAssets = Array.from(new Set(missingAssets));
+      statusEl.textContent = `Missing referenced assets: ${uniqueAssets.join(", ")}. Upload the .bin and texture files alongside your .gltf file or choose the containing folder.`;
+      console.warn("Missing GLTF asset references:", uniqueAssets);
+      return;
+    }
+
+    // Recursively rewrite all URIs in the JSON
     const rewritten = replaceUriValues(parsed, assetMap);
+
+    console.log("Rewritten GLTF buffers:", rewritten.buffers);
+
     const rewrittenText = JSON.stringify(rewritten);
+    
+    // Create a blob URL for the rewritten GLTF
     const rewrittenUrl = URL.createObjectURL(
       new Blob([rewrittenText], { type: "application/json" }),
     );
-    objectUrlsToRevoke.push(...Array.from(assetMap.values()), rewrittenUrl);
+    
+    console.log("Rewritten GLTF blob URL:", rewrittenUrl);
+    
+    // Collect all URLs to revoke later
+    const allAssetUrls = Array.from(assetMap.values());
+    objectUrlsToRevoke.push(rewrittenUrl, ...allAssetUrls);
 
     const loader = new GLTFLoader();
+    // Set basePath to empty string so loader uses absolute URLs from JSON
+    loader.setPath("");
+    
     loader.load(
       rewrittenUrl,
       (gltf) => {
@@ -323,15 +534,32 @@ function initViewer() {
 
     if (mtlFile) {
       const mtlText = await mtlFile.text();
+      
+      // Rewrite MTL to point to resolved asset URLs
       const rewrittenMtlText = mtlText
         .replace(/\\/g, "/")
-        .replace(/(map_Kd|map_Ka|map_bump|bump)\s+([^\s]+)/gi, (match, key, value) => {
-          const normalized = value.replace(/\\/g, "/").toLowerCase();
-          const direct = assetMap.get(normalized);
-          const basename = normalized.split("/").pop();
-          const resolved = direct ?? assetMap.get(basename) ?? value;
+        .replace(/(map_Kd|map_Ka|map_bump|bump|map_Ns|map_d|disp)\s+([^\s]+)/gi, (match, key, value) => {
+          // Resolve the texture path through assetMap to get blob URL
+          let resolved = resolveAssetUrl(value, assetMap);
+          
+          // If we got back the original value (not found), try with different extensions
+          if (resolved === value) {
+            const baseName = value.replace(/\.[^.]+$/, '').toLowerCase();
+            const extensions = ['.png', '.jpg', '.jpeg', '.tga'];
+            
+            for (const ext of extensions) {
+              const withExt = baseName + ext;
+              const resolved2 = resolveAssetUrl(withExt, assetMap);
+              if (resolved2 !== withExt) {
+                resolved = resolved2;
+                break;
+              }
+            }
+          }
+          
           return `${key} ${resolved}`;
         });
+      
       const mtlUrl = URL.createObjectURL(new Blob([rewrittenMtlText], { type: "text/plain" }));
       objectUrlsToRevoke.push(mtlUrl);
 
@@ -526,6 +754,15 @@ function initViewer() {
     link.href = renderer.domElement.toDataURL("image/png");
     link.click();
     statusEl.textContent = "Exported current view to PNG.";
+  });
+
+  [toggleTexturesInput, toggleWireframeInput].forEach((input) => {
+    input?.addEventListener("change", () => {
+      if (currentModel) {
+        applyDisplaySettings(currentModel);
+        updateMaterialInspector(currentModel);
+      }
+    });
   });
 
   window.addEventListener("resize", () => {
