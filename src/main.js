@@ -103,11 +103,26 @@ function initViewer() {
     });
   }
 
+  function removeCurrentModel() {
+    if (currentModel) {
+      scene.remove(currentModel);
+      disposeHierarchy(currentModel);
+      currentModel = null;
+    }
+  }
+
   function clearScene() {
-    if (!currentModel) return;
-    scene.remove(currentModel);
-    disposeHierarchy(currentModel);
+    removeCurrentModel();
+    cleanupObject(objectUrlsToRevoke);
+    objectUrlsToRevoke = [];
+  }
+
+  function failLoad(message, error) {
+    cleanupObject(objectUrlsToRevoke);
+    objectUrlsToRevoke = [];
     currentModel = null;
+    statusEl.textContent = message;
+    console.error(error);
   }
 
   function applyDisplaySettings(object) {
@@ -184,7 +199,7 @@ function initViewer() {
   }
 
   function onModelLoaded(object, label) {
-    clearScene();
+    removeCurrentModel();
     object.rotation.set(0, 0, 0);
     object.position.set(0, 0, 0);
     object.scale.set(1, 1, 1);
@@ -272,72 +287,11 @@ function initViewer() {
     return map;
   }
 
-  function createTextureLoader(assetMap) {
-    const textureLoader = new THREE.TextureLoader();
-    const tgaLoader = new TGALoader();
-    
-    return {
-      load: (url, onLoad, onProgress, onError) => {
-        // Resolve the URL from asset map
-        const resolvedUrl = resolveAssetUrl(url, assetMap);
-        
-        const loadTexture = (urlToLoad) => {
-          if (urlToLoad.toLowerCase().endsWith('.tga')) {
-            tgaLoader.load(
-              urlToLoad,
-              onLoad,
-              onProgress,
-              (err) => {
-                // TGA failed, try to find PNG or JPG equivalent
-                const baseName = urlToLoad.replace(/\.[^.]+$/, '');
-                const pngUrl = resolveAssetUrl(baseName + '.png', assetMap);
-                const jpgUrl = resolveAssetUrl(baseName + '.jpg', assetMap);
-                
-                if (pngUrl !== baseName + '.png') {
-                  textureLoader.load(pngUrl, onLoad, onProgress, (err2) => {
-                    if (jpgUrl !== baseName + '.jpg') {
-                      textureLoader.load(jpgUrl, onLoad, onProgress, onError);
-                    } else {
-                      onError(err);
-                    }
-                  });
-                } else if (jpgUrl !== baseName + '.jpg') {
-                  textureLoader.load(jpgUrl, onLoad, onProgress, onError);
-                } else {
-                  onError(err);
-                }
-              }
-            );
-          } else if (urlToLoad.toLowerCase().endsWith('.bin')) {
-            // .bin files are typically embedded binary data - skip loading as texture
-            onLoad(new THREE.Texture());
-          } else {
-            textureLoader.load(urlToLoad, onLoad, onProgress, (err) => {
-              // If standard format fails, try to find alternative
-              const baseName = urlToLoad.replace(/\.[^.]+$/, '');
-              const extensions = ['.png', '.jpg', '.jpeg', '.tga'];
-              let foundAlternative = false;
-              
-              for (const ext of extensions) {
-                const altUrl = resolveAssetUrl(baseName + ext, assetMap);
-                if (altUrl !== baseName + ext && altUrl !== urlToLoad) {
-                  foundAlternative = true;
-                  const loader = ext === '.tga' ? tgaLoader : textureLoader;
-                  loader.load(altUrl, onLoad, onProgress, onError);
-                  break;
-                }
-              }
-              
-              if (!foundAlternative) {
-                onError(err);
-              }
-            });
-          }
-        };
-        
-        loadTexture(resolvedUrl);
-      }
-    };
+  function createLoadingManager(assetMap) {
+    const manager = new THREE.LoadingManager();
+    manager.setURLModifier((url) => resolveAssetUrl(url, assetMap));
+    manager.addHandler(/\.tga$/i, new TGALoader(manager));
+    return manager;
   }
 
   function resolveAssetUrl(value, assetMap) {
@@ -387,10 +341,6 @@ function initViewer() {
   }
 
   function replaceUriValues(value, assetMap) {
-    if (typeof value === "string") {
-      return resolveAssetUrl(value, assetMap);
-    }
-
     if (Array.isArray(value)) {
       return value.map((entry) => replaceUriValues(entry, assetMap));
     }
@@ -399,7 +349,7 @@ function initViewer() {
       const cloned = {};
       for (const [key, childValue] of Object.entries(value)) {
         if (key === "uri" && typeof childValue === "string") {
-          cloned[key] = replaceUriValues(childValue, assetMap);
+          cloned[key] = resolveAssetUrl(childValue, assetMap);
         } else {
           cloned[key] = replaceUriValues(childValue, assetMap);
         }
@@ -408,6 +358,43 @@ function initViewer() {
     }
 
     return value;
+  }
+
+  function resolveTextureReference(value, assetMap) {
+    let resolved = resolveAssetUrl(value, assetMap);
+
+    if (resolved !== value) {
+      return resolved;
+    }
+
+    const baseName = value.replace(/\.[^.]+$/, "").toLowerCase();
+    const extensions = [".png", ".jpg", ".jpeg", ".tga"];
+
+    for (const ext of extensions) {
+      const withExt = baseName + ext;
+      const fallback = resolveAssetUrl(withExt, assetMap);
+      if (fallback !== withExt) {
+        return fallback;
+      }
+    }
+
+    return value;
+  }
+
+  function rewriteMtlTextureLine(line, assetMap) {
+    const match = line.match(/^(\s*(?:map_Kd|map_Ka|map_bump|bump|map_Ns|map_d|disp)\s+)(.+)$/i);
+    if (!match) return line;
+
+    const [, prefix, value] = match;
+    const parts = value.trim().split(/\s+/);
+    const texturePath = parts.pop();
+
+    if (!texturePath) {
+      return line;
+    }
+
+    const options = parts.length ? `${parts.join(" ")} ` : "";
+    return `${prefix}${options}${resolveTextureReference(texturePath, assetMap)}`;
   }
 
   async function loadGLTF(files) {
@@ -427,14 +414,14 @@ function initViewer() {
       loader.load(
         url,
         (gltf) => {
-          cleanupObject(objectUrlsToRevoke);
-          objectUrlsToRevoke = [];
           onModelLoaded(gltf.scene, selectedFile.name);
         },
         undefined,
         (error) => {
-          statusEl.textContent = `Failed to load ${selectedFile.name}: ${error.message}. Try uploading the model with its .bin and texture files, or choose a folder.`;
-          console.error(error);
+          failLoad(
+            `Failed to load ${selectedFile.name}: ${error.message}. Try uploading the model with its .bin and texture files, or choose a folder.`,
+            error,
+          );
         },
       );
       return;
@@ -442,34 +429,29 @@ function initViewer() {
 
     // For .gltf files, load and rewrite the JSON with resolved asset URIs
     const assetMap = createAssetUrlMap(files);
-    console.log("Asset map created with entries:", assetMap.size, "files");
-    for (const [key, value] of assetMap.entries()) {
-      console.log(`  ${key} -> ${value}`);
-    }
-    
     const text = await selectedFile.text();
     const parsed = JSON.parse(text);
 
-    console.log("Original GLTF buffers:", parsed.buffers);
-
     const missingAssets = [];
     const gatherUris = (value) => {
-      if (typeof value === "string") {
-        if (value.startsWith("data:")) {
-          return;
-        }
-        const resolved = resolveAssetUrl(value, assetMap);
-        if (resolved === value) {
-          missingAssets.push(value);
-        }
-        return;
-      }
       if (Array.isArray(value)) {
         value.forEach((entry) => gatherUris(entry));
         return;
       }
       if (value && typeof value === "object") {
-        Object.values(value).forEach((childValue) => gatherUris(childValue));
+        for (const [key, childValue] of Object.entries(value)) {
+          if (key === "uri" && typeof childValue === "string") {
+            if (childValue.startsWith("data:") || childValue.startsWith("blob:")) {
+              continue;
+            }
+            const resolved = resolveAssetUrl(childValue, assetMap);
+            if (resolved === childValue) {
+              missingAssets.push(childValue);
+            }
+            continue;
+          }
+          gatherUris(childValue);
+        }
       }
     };
     gatherUris(parsed);
@@ -478,42 +460,33 @@ function initViewer() {
       const uniqueAssets = Array.from(new Set(missingAssets));
       statusEl.textContent = `Missing referenced assets: ${uniqueAssets.join(", ")}. Upload the .bin and texture files alongside your .gltf file or choose the containing folder.`;
       console.warn("Missing GLTF asset references:", uniqueAssets);
+      cleanupObject(Array.from(assetMap.values()));
       return;
     }
 
-    // Recursively rewrite all URIs in the JSON
     const rewritten = replaceUriValues(parsed, assetMap);
-
-    console.log("Rewritten GLTF buffers:", rewritten.buffers);
-
     const rewrittenText = JSON.stringify(rewritten);
-    
-    // Create a blob URL for the rewritten GLTF
     const rewrittenUrl = URL.createObjectURL(
       new Blob([rewrittenText], { type: "application/json" }),
     );
-    
-    console.log("Rewritten GLTF blob URL:", rewrittenUrl);
-    
-    // Collect all URLs to revoke later
-    const allAssetUrls = Array.from(assetMap.values());
+
+    const allAssetUrls = Array.from(new Set(assetMap.values()));
     objectUrlsToRevoke.push(rewrittenUrl, ...allAssetUrls);
 
-    const loader = new GLTFLoader();
-    // Set basePath to empty string so loader uses absolute URLs from JSON
+    const loader = new GLTFLoader(createLoadingManager(assetMap));
     loader.setPath("");
-    
+
     loader.load(
       rewrittenUrl,
       (gltf) => {
-        cleanupObject(objectUrlsToRevoke);
-        objectUrlsToRevoke = [];
         onModelLoaded(gltf.scene, selectedFile.name);
       },
       undefined,
       (error) => {
-        statusEl.textContent = `Failed to load ${selectedFile.name}: ${error.message}. Try uploading the model with its .bin and texture files, or choose a folder.`;
-        console.error(error);
+        failLoad(
+          `Failed to load ${selectedFile.name}: ${error.message}. Try uploading the model with its .bin and texture files, or choose a folder.`,
+          error,
+        );
       },
     );
   }
@@ -534,32 +507,13 @@ function initViewer() {
 
     if (mtlFile) {
       const mtlText = await mtlFile.text();
-      
-      // Rewrite MTL to point to resolved asset URLs
+
       const rewrittenMtlText = mtlText
         .replace(/\\/g, "/")
-        .replace(/(map_Kd|map_Ka|map_bump|bump|map_Ns|map_d|disp)\s+([^\s]+)/gi, (match, key, value) => {
-          // Resolve the texture path through assetMap to get blob URL
-          let resolved = resolveAssetUrl(value, assetMap);
-          
-          // If we got back the original value (not found), try with different extensions
-          if (resolved === value) {
-            const baseName = value.replace(/\.[^.]+$/, '').toLowerCase();
-            const extensions = ['.png', '.jpg', '.jpeg', '.tga'];
-            
-            for (const ext of extensions) {
-              const withExt = baseName + ext;
-              const resolved2 = resolveAssetUrl(withExt, assetMap);
-              if (resolved2 !== withExt) {
-                resolved = resolved2;
-                break;
-              }
-            }
-          }
-          
-          return `${key} ${resolved}`;
-        });
-      
+        .split("\n")
+        .map((line) => rewriteMtlTextureLine(line, assetMap))
+        .join("\n");
+
       const mtlUrl = URL.createObjectURL(new Blob([rewrittenMtlText], { type: "text/plain" }));
       objectUrlsToRevoke.push(mtlUrl);
 
@@ -567,31 +521,28 @@ function initViewer() {
       const rewrittenObjUrl = URL.createObjectURL(new Blob([rewrittenObjText], { type: "text/plain" }));
       objectUrlsToRevoke.push(rewrittenObjUrl);
 
-      const mtlLoader = new MTLLoader();
+      const loadingManager = createLoadingManager(assetMap);
+      const mtlLoader = new MTLLoader(loadingManager);
       mtlLoader.load(
         mtlUrl,
         (materials) => {
           materials.preload();
-          const objLoader = new OBJLoader();
+          const objLoader = new OBJLoader(loadingManager);
           objLoader.setMaterials(materials);
           objLoader.load(
             rewrittenObjUrl,
             (object) => {
-              cleanupObject(objectUrlsToRevoke);
-              objectUrlsToRevoke = [];
               onModelLoaded(object, objFile.name);
             },
             undefined,
             (error) => {
-              statusEl.textContent = `Failed to load ${objFile.name}: ${error.message}`;
-              console.error(error);
+              failLoad(`Failed to load ${objFile.name}: ${error.message}`, error);
             },
           );
         },
         undefined,
         (error) => {
-          statusEl.textContent = `Failed to load materials for ${objFile.name}: ${error.message}`;
-          console.error(error);
+          failLoad(`Failed to load materials for ${objFile.name}: ${error.message}`, error);
         },
       );
       return;
@@ -601,14 +552,11 @@ function initViewer() {
     objLoader.load(
       objUrl,
       (object) => {
-        cleanupObject(objectUrlsToRevoke);
-        objectUrlsToRevoke = [];
         onModelLoaded(object, objFile.name);
       },
       undefined,
       (error) => {
-        statusEl.textContent = `Failed to load ${objFile.name}: ${error.message}`;
-        console.error(error);
+        failLoad(`Failed to load ${objFile.name}: ${error.message}`, error);
       },
     );
   }
@@ -620,14 +568,11 @@ function initViewer() {
     loader.load(
       url,
       (object) => {
-        cleanupObject(objectUrlsToRevoke);
-        objectUrlsToRevoke = [];
         onModelLoaded(object, file.name);
       },
       undefined,
       (error) => {
-        statusEl.textContent = `Failed to load ${file.name}: ${error.message}`;
-        console.error(error);
+        failLoad(`Failed to load ${file.name}: ${error.message}`, error);
       },
     );
   }
@@ -695,11 +640,12 @@ function initViewer() {
     const fileArray = Array.from(files || []);
     if (!fileArray.length) return;
 
-    const hasGLTF = fileArray.some((file) => /\.gltf?$/i.test(file.name));
+    const hasGLTF = fileArray.some((file) => /\.(gltf|glb)$/i.test(file.name));
     const hasOBJ = fileArray.some((file) => /\.obj$/i.test(file.name));
     const hasFBX = fileArray.some((file) => /\.fbx$/i.test(file.name));
 
     statusEl.textContent = "Loading model…";
+    clearScene();
 
     if (hasGLTF) {
       loadGLTF(fileArray);
